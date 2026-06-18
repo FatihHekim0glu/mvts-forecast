@@ -57,7 +57,14 @@ def default_artifact_path(model_name: str) -> Path:
     ValidationError
         If ``model_name`` is not a known deep-model name.
     """
-    raise NotImplementedError
+    from mvtsforecast._exceptions import ValidationError
+
+    if model_name not in ARTIFACT_FILENAMES:
+        raise ValidationError(
+            f"default_artifact_path: unknown deep-model name {model_name!r}; "
+            f"expected one of {ONNX_MODEL_NAMES}."
+        )
+    return ARTIFACTS_DIR / ARTIFACT_FILENAMES[model_name]
 
 
 class OnnxForecaster:
@@ -112,7 +119,32 @@ class OnnxForecaster:
         ArtifactError
             If the artifact file is missing or the session fails to initialize.
         """
-        raise NotImplementedError
+        if self._session is not None:
+            return self
+
+        from mvtsforecast._exceptions import ArtifactError
+
+        if not self._artifact_path.is_file():
+            raise ArtifactError(
+                f"OnnxForecaster.load: ONNX artifact for {self._model_name!r} not found at "
+                f"{self._artifact_path}."
+            )
+
+        try:
+            import onnxruntime as ort
+
+            self._session = ort.InferenceSession(
+                str(self._artifact_path),
+                providers=["CPUExecutionProvider"],
+            )
+        except ArtifactError:  # pragma: no cover - defensive: re-raise our own errors verbatim
+            raise
+        except Exception as exc:  # normalize any onnxruntime error to ArtifactError
+            raise ArtifactError(
+                f"OnnxForecaster.load: failed to initialize onnxruntime session for "
+                f"{self._artifact_path}: {exc}"
+            ) from exc
+        return self
 
     def predict(self, x: SequenceTensor) -> FloatArray:
         """Run the ONNX forward pass on a PRE-SCALED sequence tensor.
@@ -138,4 +170,36 @@ class OnnxForecaster:
             If the session cannot be loaded or the input shape does not match the
             exported graph signature.
         """
-        raise NotImplementedError
+        import numpy as np
+
+        from mvtsforecast._exceptions import ArtifactError
+
+        x_arr = np.asarray(x, dtype=np.float32)
+        if x_arr.ndim != 3:
+            raise ArtifactError(
+                f"OnnxForecaster.predict: x must be a 3-D "
+                f"(n_samples, look_back, n_features) tensor, got ndim={x_arr.ndim}."
+            )
+        # An empty test slice short-circuits without touching the session, so the
+        # walk-forward engine can stack a degenerate fold torch-free.
+        if x_arr.shape[0] == 0:
+            return np.empty((0,), dtype=np.float64)
+
+        self.load()
+        session = self._session
+        if session is None:  # pragma: no cover - load() always sets a session or raises
+            raise ArtifactError("OnnxForecaster.predict: session failed to initialize.")
+
+        # ``session`` is an onnxruntime.InferenceSession typed loosely (object) so
+        # the package never imports onnxruntime at module load.
+        input_name = session.get_inputs()[0].name  # type: ignore[attr-defined]
+        try:
+            outputs = session.run(None, {input_name: x_arr})  # type: ignore[attr-defined]
+        except Exception as exc:  # normalize onnxruntime runtime errors
+            raise ArtifactError(
+                f"OnnxForecaster.predict: onnxruntime forward pass failed for "
+                f"{self._model_name!r} (check the input shape matches the exported "
+                f"signature): {exc}"
+            ) from exc
+
+        return np.asarray(outputs[0], dtype=np.float64).reshape(-1)

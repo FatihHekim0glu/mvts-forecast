@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from mvtsforecast._exceptions import ValidationError
 from mvtsforecast._typing import FloatArray, SequenceTensor
 
 
@@ -57,6 +58,45 @@ class PatchTSTConfig:
     dropout: float = 0.0
     use_revin: bool = True
 
+    def __post_init__(self) -> None:
+        """Validate sizes, patch geometry, and the head/d_model divisibility.
+
+        Raises
+        ------
+        ValidationError
+            If any size is ``< 1``, ``patch_len > look_back``,
+            ``d_model`` is not divisible by ``n_heads``, or ``dropout`` is
+            outside ``[0, 1)``.
+        """
+        sizes = (
+            self.look_back,
+            self.n_features,
+            self.patch_len,
+            self.stride,
+            self.d_model,
+            self.n_heads,
+            self.n_layers,
+        )
+        if min(sizes) < 1:
+            raise ValidationError(f"PatchTSTConfig: sizes must be >= 1, got {self!r}.")
+        if self.patch_len > self.look_back:
+            raise ValidationError(
+                f"PatchTSTConfig: patch_len ({self.patch_len}) must be <= look_back "
+                f"({self.look_back})."
+            )
+        if self.d_model % self.n_heads != 0:
+            raise ValidationError(
+                f"PatchTSTConfig: d_model ({self.d_model}) must be divisible by n_heads "
+                f"({self.n_heads})."
+            )
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValidationError(f"PatchTSTConfig: dropout must be in [0, 1), got {self.dropout}.")
+
+    @property
+    def n_patches(self) -> int:
+        """Number of patches a ``look_back`` window yields under this geometry."""
+        return (self.look_back - self.patch_len) // self.stride + 1
+
     def to_dict(self) -> dict[str, Any]:
         """Return a plain, JSON-serializable ``dict`` of this config."""
         return asdict(self)
@@ -87,7 +127,51 @@ def build_patchtst(config: PatchTSTConfig) -> Any:
         If ``patch_len``/``stride`` are inconsistent with ``look_back`` or
         ``d_model`` is not divisible by ``n_heads``.
     """
-    raise NotImplementedError
+    import torch
+    from torch import nn
+
+    class _PatchTST(nn.Module):
+        """Patching + channel-independent transformer encoder + linear head."""
+
+        def __init__(self, cfg: PatchTSTConfig) -> None:
+            super().__init__()
+            self.patch_len = cfg.patch_len
+            self.stride = cfg.stride
+            self.n_features = cfg.n_features
+            self.n_patches = cfg.n_patches
+
+            self.patch_embed = nn.Linear(cfg.patch_len, cfg.d_model)
+            # Learned positional embedding over the patch axis.
+            self.pos_embed = nn.Parameter(torch.zeros(1, self.n_patches, cfg.d_model))
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=cfg.d_model,
+                nhead=cfg.n_heads,
+                dim_feedforward=cfg.d_model * 2,
+                dropout=cfg.dropout,
+                batch_first=True,
+                activation="gelu",
+            )
+            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=cfg.n_layers)
+            # Flatten the per-channel encoded patches, then project all channels to 1.
+            self.head = nn.Linear(self.n_patches * cfg.d_model * cfg.n_features, 1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            # x: (batch, look_back, n_features) -> (batch, n_features, look_back).
+            batch = x.shape[0]
+            x = x.transpose(1, 2)
+            # Channel-independent patching via unfold over the time axis:
+            #   (batch, n_features, n_patches, patch_len).
+            patches = x.unfold(dimension=2, size=self.patch_len, step=self.stride)
+            # Fold channels into the batch so every channel shares encoder weights.
+            patches = patches.reshape(batch * self.n_features, self.n_patches, self.patch_len)
+            tokens = self.patch_embed(patches) + self.pos_embed
+            encoded = self.encoder(tokens)
+            # Back to (batch, n_features * n_patches * d_model) for the joint head.
+            flat = encoded.reshape(batch, -1)
+            forecast: torch.Tensor = self.head(flat)
+            return forecast
+
+    return _PatchTST(config)
 
 
 def train_patchtst(
@@ -130,4 +214,13 @@ def train_patchtst(
     ValidationError
         If the tensors are mis-shaped or empty.
     """
-    raise NotImplementedError
+    import torch
+
+    from mvtsforecast.models.lstm import _fit_module, _validate_train_tensors
+
+    x_arr, y_arr = _validate_train_tensors(x_train, y_train, config)
+
+    torch.manual_seed(int(seed))
+    model = build_patchtst(config)
+    _fit_module(model, x_arr, y_arr, epochs=epochs, lr=lr)
+    return model

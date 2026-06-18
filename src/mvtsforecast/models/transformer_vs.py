@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from mvtsforecast._exceptions import ValidationError
 from mvtsforecast._typing import FloatArray, SequenceTensor
 
 
@@ -53,6 +54,28 @@ class TransformerVSConfig:
     dropout: float = 0.0
     use_revin: bool = True
 
+    def __post_init__(self) -> None:
+        """Validate sizes and the head/d_model divisibility.
+
+        Raises
+        ------
+        ValidationError
+            If any size is ``< 1``, ``d_model`` is not divisible by ``n_heads``,
+            or ``dropout`` is outside ``[0, 1)``.
+        """
+        sizes = (self.look_back, self.n_features, self.d_model, self.n_heads, self.n_layers)
+        if min(sizes) < 1:
+            raise ValidationError(f"TransformerVSConfig: sizes must be >= 1, got {self!r}.")
+        if self.d_model % self.n_heads != 0:
+            raise ValidationError(
+                f"TransformerVSConfig: d_model ({self.d_model}) must be divisible by n_heads "
+                f"({self.n_heads})."
+            )
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValidationError(
+                f"TransformerVSConfig: dropout must be in [0, 1), got {self.dropout}."
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """Return a plain, JSON-serializable ``dict`` of this config."""
         return asdict(self)
@@ -65,6 +88,10 @@ def build_transformer_vs(config: TransformerVSConfig) -> Any:
     ``(batch, look_back, n_features)`` input per-feature (the interpretable
     variable-selection weights), encodes the gated sequence with a small
     self-attention stack, and emits ``(batch, 1)``.
+
+    The returned module exposes a ``variable_weights`` buffer (the softmaxed,
+    learnable per-feature importances) so the relative channel contribution is
+    readable after training.
 
     Parameters
     ----------
@@ -83,7 +110,50 @@ def build_transformer_vs(config: TransformerVSConfig) -> Any:
     ValidationError
         If ``d_model`` is not divisible by ``n_heads`` or a field is out of range.
     """
-    raise NotImplementedError
+    import torch
+    from torch import nn
+
+    class _TransformerVS(nn.Module):
+        """Per-feature variable selection + self-attention encoder + linear head."""
+
+        def __init__(self, cfg: TransformerVSConfig) -> None:
+            super().__init__()
+            self.n_features = cfg.n_features
+            # Learnable per-feature logits -> softmax gate (the interpretable
+            # variable-selection weights). One scalar importance per input channel.
+            self.var_logits = nn.Parameter(torch.zeros(cfg.n_features))
+            # Project the gated (scalar-per-timestep) sequence into d_model tokens.
+            self.value_embed = nn.Linear(1, cfg.d_model)
+            self.pos_embed = nn.Parameter(torch.zeros(1, cfg.look_back, cfg.d_model))
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=cfg.d_model,
+                nhead=cfg.n_heads,
+                dim_feedforward=cfg.d_model * 2,
+                dropout=cfg.dropout,
+                batch_first=True,
+                activation="gelu",
+            )
+            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=cfg.n_layers)
+            self.head = nn.Linear(cfg.d_model, 1)
+
+        def variable_weights(self) -> torch.Tensor:
+            """Return the softmaxed per-feature importance weights (sum to 1)."""
+            weights: torch.Tensor = torch.softmax(self.var_logits, dim=0)
+            return weights
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            # x: (batch, look_back, n_features). Gate features then collapse to a
+            # scalar per timestep via the (normalized) variable-selection weights.
+            gate = torch.softmax(self.var_logits, dim=0)
+            gated = (x * gate).sum(dim=-1, keepdim=True)  # (batch, look_back, 1)
+            tokens = self.value_embed(gated) + self.pos_embed
+            encoded = self.encoder(tokens)
+            # Read out the last position's encoded state.
+            last = encoded[:, -1, :]
+            forecast: torch.Tensor = self.head(last)
+            return forecast
+
+    return _TransformerVS(config)
 
 
 def train_transformer_vs(
@@ -126,4 +196,13 @@ def train_transformer_vs(
     ValidationError
         If the tensors are mis-shaped or empty.
     """
-    raise NotImplementedError
+    import torch
+
+    from mvtsforecast.models.lstm import _fit_module, _validate_train_tensors
+
+    x_arr, y_arr = _validate_train_tensors(x_train, y_train, config)
+
+    torch.manual_seed(int(seed))
+    model = build_transformer_vs(config)
+    _fit_module(model, x_arr, y_arr, epochs=epochs, lr=lr)
+    return model

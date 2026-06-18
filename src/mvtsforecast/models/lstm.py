@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from mvtsforecast._exceptions import ValidationError
 from mvtsforecast._typing import FloatArray, SequenceTensor
 
 
@@ -44,6 +45,20 @@ class LstmConfig:
     num_layers: int = 1
     dropout: float = 0.0
     use_revin: bool = True
+
+    def __post_init__(self) -> None:
+        """Validate that sizes/rates are in range.
+
+        Raises
+        ------
+        ValidationError
+            If ``look_back``, ``n_features``, ``hidden_size``, or ``num_layers``
+            is ``< 1``, or ``dropout`` is outside ``[0, 1)``.
+        """
+        if min(self.look_back, self.n_features, self.hidden_size, self.num_layers) < 1:
+            raise ValidationError(f"LstmConfig: sizes must be >= 1, got {self!r}.")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValidationError(f"LstmConfig: dropout must be in [0, 1), got {self.dropout}.")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a plain, JSON-serializable ``dict`` of this config."""
@@ -75,7 +90,32 @@ def build_lstm(config: LstmConfig) -> Any:
     ValidationError
         If any config field is out of range.
     """
-    raise NotImplementedError
+    import torch
+    from torch import nn
+
+    class _LstmForecaster(nn.Module):
+        """LSTM encoder + linear head -> one next-step return per window."""
+
+        def __init__(self, cfg: LstmConfig) -> None:
+            super().__init__()
+            self.lstm = nn.LSTM(
+                input_size=cfg.n_features,
+                hidden_size=cfg.hidden_size,
+                num_layers=cfg.num_layers,
+                batch_first=True,
+                # torch forbids dropout with a single layer (it would be a no-op).
+                dropout=cfg.dropout if cfg.num_layers > 1 else 0.0,
+            )
+            self.head = nn.Linear(cfg.hidden_size, 1)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            # x: (batch, look_back, n_features). Read out the LAST hidden state.
+            output, _ = self.lstm(x)
+            last = output[:, -1, :]
+            forecast: torch.Tensor = self.head(last)
+            return forecast
+
+    return _LstmForecaster(config)
 
 
 def train_lstm(
@@ -118,4 +158,74 @@ def train_lstm(
     ValidationError
         If the tensors are mis-shaped or empty.
     """
-    raise NotImplementedError
+    import torch
+
+    x_arr, y_arr = _validate_train_tensors(x_train, y_train, config)
+
+    torch.manual_seed(int(seed))
+    model = build_lstm(config)
+    _fit_module(model, x_arr, y_arr, epochs=epochs, lr=lr)
+    return model
+
+
+def _validate_train_tensors(
+    x_train: SequenceTensor,
+    y_train: FloatArray,
+    config: Any,
+) -> tuple[FloatArray, FloatArray]:
+    """Coerce/validate the train tensors against ``config`` (shared by all models).
+
+    ``config`` is any frozen model config exposing ``look_back`` / ``n_features``
+    (``LstmConfig`` / ``PatchTSTConfig`` / ``TransformerVSConfig``).
+    """
+    import numpy as np
+
+    x_arr = np.asarray(x_train, dtype=np.float64)
+    y_arr = np.asarray(y_train, dtype=np.float64).reshape(-1)
+    if x_arr.ndim != 3:
+        raise ValidationError(f"train: x_train must be a 3-D tensor, got ndim={x_arr.ndim}.")
+    if x_arr.shape[0] == 0:
+        raise ValidationError("train: x_train must be non-empty.")
+    if x_arr.shape[0] != y_arr.shape[0]:
+        raise ValidationError(
+            f"train: x_train has {x_arr.shape[0]} samples but y_train has "
+            f"{y_arr.shape[0]}; they must match."
+        )
+    if (x_arr.shape[1], x_arr.shape[2]) != (config.look_back, config.n_features):
+        raise ValidationError(
+            f"train: x_train trailing dims {(x_arr.shape[1], x_arr.shape[2])} do not "
+            f"match config (look_back={config.look_back}, n_features={config.n_features})."
+        )
+    return x_arr, y_arr
+
+
+def _fit_module(
+    model: Any,
+    x_arr: FloatArray,
+    y_arr: FloatArray,
+    *,
+    epochs: int,
+    lr: float,
+) -> None:
+    """Full-batch MSE fit (shared by all three deep models; offline-only)."""
+    import torch
+    from torch import nn
+
+    if epochs < 1:
+        raise ValidationError(f"train: epochs must be >= 1, got {epochs}.")
+    if lr <= 0.0:
+        raise ValidationError(f"train: lr must be > 0, got {lr}.")
+
+    x_t = torch.as_tensor(x_arr, dtype=torch.float32)
+    y_t = torch.as_tensor(y_arr, dtype=torch.float32).reshape(-1, 1)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=float(lr))
+    loss_fn = nn.MSELoss()
+    model.train()
+    for _ in range(int(epochs)):
+        optimizer.zero_grad()
+        prediction = model(x_t)
+        loss = loss_fn(prediction, y_t)
+        loss.backward()
+        optimizer.step()
+    model.eval()
