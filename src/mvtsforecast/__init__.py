@@ -82,6 +82,7 @@ from mvtsforecast.serve import (
     ForecastRun,
     ForecastSummary,
     forecast_from_onnx,
+    run_compare,
     run_forecast,
 )
 from mvtsforecast.train import TrainResult, train_pipeline
@@ -157,6 +158,7 @@ __all__ = [  # noqa: RUF022 - grouped by domain for readability, not alphabetize
     "ForecastSummary",
     "TrainResult",
     "forecast_from_onnx",
+    "run_compare",
     "run_forecast",
     "train_pipeline",
     # evaluation

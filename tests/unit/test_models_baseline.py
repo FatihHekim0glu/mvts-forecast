@@ -235,9 +235,7 @@ def test_arima_forecast_refuses_to_difference_returns(
         (np.array([0.1, 0.2, 0.3, 0.4]), 0, "n_test"),
     ],
 )
-def test_arima_forecast_input_validation(
-    train: np.ndarray, n_test: int, match: str
-) -> None:
+def test_arima_forecast_input_validation(train: np.ndarray, n_test: int, match: str) -> None:
     """Empty/non-finite train or non-positive ``n_test`` raise ValidationError."""
     with pytest.raises(ValidationError, match=match):
         arima_forecast(train, n_test=n_test)

@@ -110,10 +110,19 @@ def test_error_figure_nonfinite_value_raises() -> None:
 
 
 def test_plots_import_is_torch_free() -> None:
-    """Importing plots must not pull in torch / onnxruntime (import purity)."""
+    """Importing plots must not pull in torch / onnxruntime (import purity).
+
+    Verified in a FRESH interpreter so the assertion is robust to ``sys.modules``
+    pollution from earlier ``slow`` torch tests in the same pytest process.
+    """
+    import subprocess
     import sys
 
-    import mvtsforecast.plots  # noqa: F401
-
-    assert "torch" not in sys.modules
-    assert "onnxruntime" not in sys.modules
+    code = (
+        "import sys;"
+        "import mvtsforecast.plots;"
+        "bad=[m for m in ('torch','onnxruntime') if m in sys.modules];"
+        "print(','.join(bad))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "", f"importing plots leaked: {out.stdout.strip()}"
