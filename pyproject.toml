@@ -1,0 +1,212 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mvts-forecast"
+version = "0.1.0"
+description = "A leakage-free multivariate-transformer forecast benchmark: pit a PatchTST-style encoder and an interpretable variable-selection transformer against an LSTM, ARIMA, and a naive random-walk baseline on a multivariate financial time series, with RevIN + purged walk-forward and Diebold-Mariano / Deflated-Sharpe honesty — the documented result is that the deep models do NOT reliably beat naive on noisy daily returns."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "FatihHekim0glu" }]
+keywords = [
+    "transformers",
+    "patchtst",
+    "time-series",
+    "multivariate",
+    "forecasting",
+    "deep-learning",
+    "quantitative-finance",
+    "honest-null",
+    "leakage-free",
+    "diebold-mariano",
+    "deflated-sharpe",
+    "onnx",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "numpy>=1.26",
+]
+
+[project.urls]
+Homepage = "https://fatihhekimoglu.com"
+Repository = "https://github.com/FatihHekim0glu/mvts-forecast"
+Changelog = "https://github.com/FatihHekim0glu/mvts-forecast/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+# Data generation/loading, ARIMA baseline, and the honest-statistics layer.
+data = [
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "scipy>=1.11",
+    "statsmodels>=0.14",
+    "pyarrow>=15.0",
+    "diskcache>=5.6",
+]
+# Lean inference path: onnxruntime + numpy ONLY (the container — NEVER torch).
+serve = [
+    "onnxruntime>=1.17",
+]
+# Offline training/export path (heavy; never imported in the serve container).
+# torch (CPU-only) trains the small deep models; onnx + onnxruntime export them.
+train = [
+    "torch>=2.2",
+    "onnx>=1.16",
+]
+# Plotly figure builders (figures serialize to {data, layout} JSON).
+viz = [
+    "plotly>=5.20",
+    "kaleido>=0.2.1",
+]
+# Developer + parity-oracle + lint/type/test stack. Includes the lean serve stack
+# (onnxruntime) and the onnx builder so the serve / export tests run in CI WITHOUT
+# the heavy [train] (torch) extra.
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.100",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "pandas-stubs>=2.0",
+    "typer>=0.12",
+    "onnxruntime>=1.17",
+    "onnx>=1.16",
+]
+
+[project.scripts]
+mvts-forecast = "mvtsforecast.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mvtsforecast"]
+# Ship the committed ONNX artifact(s) + precomputed metrics inside the wheel.
+artifacts = [
+    "src/mvtsforecast/artifacts/*.onnx",
+    "src/mvtsforecast/artifacts/metrics.json",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/mvtsforecast",
+    "tests",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+]
+
+# --------------------------------------------------------------------------- #
+# Ruff                                                                        #
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+    "NPY",  # numpy-specific
+    "PD",   # pandas-vet
+]
+ignore = [
+    "E501",    # line length handled by formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["N802", "N803", "N806"]  # math-style names (X, y, T, N) in tests
+
+[tool.ruff.lint.pep8-naming]
+# Math-style single-capital names (sequence tensor X, sample count T/N) are intentional.
+extend-ignore-names = ["N", "T", "X"]
+
+# --------------------------------------------------------------------------- #
+# mypy (strict)                                                               #
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+show_error_codes = true
+files = ["src/mvtsforecast"]
+
+# Documented pandas override: pandas-stubs is incomplete for some DataFrame
+# operations; we accept untyped pandas internals at the boundary while keeping
+# our own signatures strictly typed. (House convention: curated pandas suppression.)
+[[tool.mypy.overrides]]
+module = ["pandas.*"]
+follow_imports = "skip"
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = [
+    "scipy.*",
+    "statsmodels.*",
+    "pmdarima.*",
+    "torch.*",
+    "onnx.*",
+    "onnxruntime.*",
+    "diskcache.*",
+    "plotly.*",
+    "typer.*",
+    "yfinance.*",
+    "pandas_datareader.*",
+    "curl_cffi.*",
+]
+ignore_missing_imports = true
+
+# --------------------------------------------------------------------------- #
+# pytest                                                                       #
+# --------------------------------------------------------------------------- #
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "unit: fast isolated unit tests",
+    "property: Hypothesis property-based invariant tests",
+    "parity: validation against an independent reference (ONNX-vs-torch, DSR, DM)",
+    "regression: pinned-snapshot / locked-behaviour tests (the random-walk anti-leakage guard)",
+    "integration: end-to-end pipeline tests (synthetic -> windows -> naive+ARIMA+ONNX -> compare)",
+    "slow: long-running tests (the torch train/export path)",
+]
+
+# --------------------------------------------------------------------------- #
+# Coverage                                                                     #
+# --------------------------------------------------------------------------- #
+[tool.coverage.run]
+branch = true
+source = ["mvtsforecast"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@overload",
+]

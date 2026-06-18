@@ -1,0 +1,61 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "mvts-forecast: a leakage-free multivariate-transformer forecast benchmark (honest NULL)"
+authors:
+  - family-names: "FatihHekim0glu"
+version: 0.1.0
+date-released: 2026-06-18
+license: MIT
+repository-code: "https://github.com/FatihHekim0glu/mvts-forecast"
+url: "https://fatihhekimoglu.com"
+keywords:
+  - transformers
+  - patchtst
+  - time-series
+  - multivariate
+  - forecasting
+  - honest-null
+  - leakage-free
+  - diebold-mariano
+  - deflated-sharpe
+references:
+  - type: article
+    title: "A Time Series is Worth 64 Words: Long-term Forecasting with Transformers"
+    authors:
+      - family-names: Nie
+        given-names: Yuqi
+      - family-names: Nguyen
+        given-names: Nam H.
+      - family-names: Sinthong
+        given-names: Phanwadee
+      - family-names: Kalagnanam
+        given-names: Jayant
+    year: 2023
+  - type: article
+    title: "Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting"
+    authors:
+      - family-names: Lim
+        given-names: Bryan
+      - family-names: "Arık"
+        given-names: "Sercan Ö."
+      - family-names: Loeff
+        given-names: Nicolas
+      - family-names: Pfister
+        given-names: Tomas
+    year: 2021
+  - type: article
+    title: "Comparing Predictive Accuracy"
+    authors:
+      - family-names: Diebold
+        given-names: Francis X.
+      - family-names: Mariano
+        given-names: Roberto S.
+    year: 1995
+  - type: article
+    title: "The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting, and Non-Normality"
+    authors:
+      - family-names: Bailey
+        given-names: David H.
+      - family-names: "López de Prado"
+        given-names: Marcos
+    year: 2014
