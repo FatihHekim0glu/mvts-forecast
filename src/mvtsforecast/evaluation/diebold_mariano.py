@@ -17,10 +17,21 @@ Importing this module has no side effects.
 
 from __future__ import annotations
 
+import math
+
+import numpy as np
+
+from mvtsforecast._exceptions import ValidationError
 from mvtsforecast._typing import FloatArray
+from mvtsforecast.evaluation.metrics import _coerce_pair, _naive_or_zeros, hac_standard_error
 
 # quantcore-candidate: mirrors pairs-trading:evaluation/hac.py +
 # lstm-forecast:evaluation/metrics.py::diebold_mariano.
+
+
+def _norm_sf(x: float) -> float:
+    """Standard-normal survival function ``1 - Phi(x)`` via the error function."""
+    return 0.5 * math.erfc(x / math.sqrt(2.0))
 
 
 def diebold_mariano(
@@ -62,7 +73,47 @@ def diebold_mariano(
         If inputs are empty/mismatched, or the loss-differential HAC variance is
         zero with a non-zero mean (the statistic is undefined).
     """
-    raise NotImplementedError
+    yt, yp = _coerce_pair(y_true, y_pred_model, pred_name="y_pred_model")
+    naive = _naive_or_zeros(yt, y_pred_naive)
+
+    loss_model = (yt - yp) ** 2
+    loss_naive = (yt - naive) ** 2
+    diff = loss_model - loss_naive  # d_t = e_model^2 - e_naive^2
+    if diff.size < 2:
+        raise ValidationError("diebold_mariano needs at least two observations.")
+
+    d_bar = float(np.mean(diff))
+    # A scale-aware degeneracy check: a loss differential with no dispersion is
+    # effectively constant. Comparing the peak-to-peak range to a tolerance
+    # scaled by the loss magnitude is robust to the float noise that a raw
+    # ``HAC_SE == 0.0`` equality check would miss (centering a constant array
+    # leaves a ~1e-20 residue rather than an exact zero).
+    spread = float(np.ptp(diff))
+    scale = max(float(np.max(np.abs(diff))), 1.0)
+    if spread <= 1e-12 * scale:
+        # No detectable dispersion in the loss differential.
+        if abs(d_bar) <= 1e-12 * scale:
+            # The two forecasts are pointwise identical (model == naive): no
+            # difference in predictive accuracy.
+            return 0.0, 1.0
+        # A non-zero CONSTANT differential: every observation agrees the model is
+        # uniformly better/worse, but with zero variance the asymptotic DM
+        # statistic is undefined (it would diverge).
+        raise ValidationError(
+            "diebold_mariano: the loss-differential has zero dispersion with a "
+            "non-zero mean; the statistic is undefined (degenerate forecasts)."
+        )
+
+    se = hac_standard_error(diff, lag=lag)
+    if se == 0.0:  # pragma: no cover - defensive: spread guard catches this first
+        raise ValidationError(
+            "diebold_mariano: the loss-differential HAC variance is zero with a "
+            "non-zero mean; the statistic is undefined."
+        )
+
+    dm_stat = d_bar / se
+    pvalue = 2.0 * _norm_sf(abs(dm_stat))
+    return dm_stat, min(1.0, pvalue)
 
 
 def dm_favours_model(dm_statistic: float, dm_pvalue: float, *, alpha: float = 0.05) -> bool:
@@ -88,4 +139,4 @@ def dm_favours_model(dm_statistic: float, dm_pvalue: float, *, alpha: float = 0.
     bool
         ``True`` iff ``dm_pvalue < alpha and dm_statistic < 0``.
     """
-    raise NotImplementedError
+    return bool(dm_pvalue < alpha and dm_statistic < 0.0)

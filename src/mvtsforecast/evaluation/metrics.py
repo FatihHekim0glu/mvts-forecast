@@ -170,7 +170,8 @@ def rmse(y_true: FloatArray, y_pred: FloatArray) -> float:
     ValidationError
         If the inputs are empty or length-mismatched.
     """
-    raise NotImplementedError
+    yt, yp = _coerce_pair(y_true, y_pred)
+    return float(np.sqrt(np.mean((yt - yp) ** 2)))
 
 
 def mae(y_true: FloatArray, y_pred: FloatArray) -> float:
@@ -193,7 +194,8 @@ def mae(y_true: FloatArray, y_pred: FloatArray) -> float:
     ValidationError
         If the inputs are empty or length-mismatched.
     """
-    raise NotImplementedError
+    yt, yp = _coerce_pair(y_true, y_pred)
+    return float(np.mean(np.abs(yt - yp)))
 
 
 def mase_vs_naive(
@@ -227,7 +229,16 @@ def mase_vs_naive(
     ValidationError
         If inputs are empty/mismatched or the baseline MAE is zero.
     """
-    raise NotImplementedError
+    yt, yp = _coerce_pair(y_true, y_pred_model, pred_name="y_pred_model")
+    naive = _naive_or_zeros(yt, y_pred_naive)
+    mae_model = float(np.mean(np.abs(yt - yp)))
+    mae_naive = float(np.mean(np.abs(yt - naive)))
+    if mae_naive == 0.0:
+        raise ValidationError(
+            "mase_vs_naive: the naive baseline MAE is zero (degenerate target), "
+            "so the scaled error is undefined."
+        )
+    return mae_model / mae_naive
 
 
 def directional_accuracy(y_true: FloatArray, y_pred: FloatArray) -> tuple[float, float]:
@@ -254,7 +265,48 @@ def directional_accuracy(y_true: FloatArray, y_pred: FloatArray) -> tuple[float,
     ValidationError
         If inputs are empty, length-mismatched, or have no scoreable direction.
     """
-    raise NotImplementedError
+    yt, yp = _coerce_pair(y_true, y_pred)
+    # Sign agreement. A zero realized return is an undefined "direction" and so
+    # cannot be a scoreable trial; ``np.sign`` returns 0 for an exact zero.
+    hits = np.sign(yt) == np.sign(yp)
+    scoreable = np.sign(yt) != 0.0
+    n_scoreable = int(scoreable.sum())
+    if n_scoreable == 0:
+        raise ValidationError(
+            "directional_accuracy: no observations with a non-zero realized direction to score."
+        )
+    n_hits = int((hits & scoreable).sum())
+    accuracy = n_hits / n_scoreable
+    pvalue = _two_sided_binomial_pvalue(n_hits, n_scoreable, 0.5)
+    return accuracy, pvalue
+
+
+def _two_sided_binomial_pvalue(k: int, n: int, p: float) -> float:
+    """Exact two-sided binomial-test p-value for ``k`` successes in ``n`` trials.
+
+    Uses the "method of small p-values" (the convention SciPy's ``binomtest``
+    uses for two-sided tests): sum the probabilities of all outcomes whose
+    likelihood is no greater than that of the observed outcome. The PMF is
+    evaluated in LOG space via :func:`math.lgamma` so a large ``n`` (thousands of
+    out-of-sample days) cannot overflow ``math.comb``; the serve path needs no
+    SciPy.
+    """
+    if n == 0:  # pragma: no cover - defensive; directional_accuracy guards n>=1
+        return 1.0
+
+    log_p = math.log(p)
+    log_q = math.log1p(-p)
+    log_binom = math.lgamma(n + 1)
+
+    def log_pmf(j: int) -> float:
+        return log_binom - math.lgamma(j + 1) - math.lgamma(n - j + 1) + j * log_p + (n - j) * log_q
+
+    observed = log_pmf(k)
+    # A tiny additive tolerance in log space guards against float rounding when
+    # symmetric outcomes have mathematically-equal probabilities.
+    tol = observed + 1e-9
+    total = math.fsum(math.exp(log_pmf(j)) for j in range(n + 1) if log_pmf(j) <= tol)
+    return min(1.0, total)
 
 
 def net_pnl_sharpe(
@@ -291,7 +343,36 @@ def net_pnl_sharpe(
     ValidationError
         If inputs are empty/mismatched or ``cost_bps`` is negative.
     """
-    raise NotImplementedError
+    yt, yp = _coerce_pair(y_true, y_pred)
+    if not math.isfinite(cost_bps) or cost_bps < 0.0:
+        raise ValidationError(
+            f"net_pnl_sharpe: cost_bps must be finite and non-negative, got {cost_bps!r}."
+        )
+
+    # The position at t is sign(forecast_{t-1}): the signal is shifted by one so
+    # it only ever uses information available BEFORE the realized return r_t —
+    # tradable, never lookahead. The implicit position before the first step is
+    # flat (0), so the first observation pays the cost of opening the position.
+    signal = np.sign(yp)
+    position = np.empty_like(signal)
+    position[0] = 0.0
+    position[1:] = signal[:-1]
+
+    gross = position * yt
+
+    cost_rate = cost_bps / 10_000.0
+    prev_position = np.empty_like(position)
+    prev_position[0] = 0.0
+    prev_position[1:] = position[:-1]
+    turnover = np.abs(position - prev_position)
+    net = gross - cost_rate * turnover
+
+    std = float(np.std(net))
+    if std == 0.0:
+        # No dispersion in the net PnL (e.g. a perpetually flat position): the
+        # Sharpe is undefined, reported as a conservative zero.
+        return 0.0
+    return float(np.mean(net) / std)
 
 
 def hac_standard_error(series: FloatArray, *, lag: int | None = None) -> float:
@@ -319,7 +400,26 @@ def hac_standard_error(series: FloatArray, *, lag: int | None = None) -> float:
         If ``series`` has fewer than two finite observations or ``lag < 0``.
     """
     # quantcore-candidate: mirrors pairs-trading:evaluation/hac.py::newey_west_se.
-    raise NotImplementedError
+    arr = np.asarray(series, dtype=np.float64).ravel()
+    arr = arr[np.isfinite(arr)]
+    t = arr.size
+    if t < 2:
+        raise ValidationError("hac_standard_error needs at least two finite observations.")
+    if lag is None:
+        lag = andrews_lag(t)
+    if lag < 0:
+        raise ValidationError(f"hac_standard_error: lag must be non-negative, got {lag}.")
+
+    centred = arr - arr.mean()
+    gamma0 = float(np.dot(centred, centred) / t)
+    omega = gamma0
+    max_lag = min(lag, t - 1)
+    for h in range(1, max_lag + 1):
+        weight = 1.0 - h / (lag + 1.0)
+        gamma_h = float(np.dot(centred[h:], centred[:-h]) / t)
+        omega += 2.0 * weight * gamma_h
+    omega = max(omega, 0.0)
+    return float(np.sqrt(omega / t))
 
 
 def andrews_lag(t: int) -> int:
@@ -340,7 +440,9 @@ def andrews_lag(t: int) -> int:
     ValidationError
         If ``t <= 0``.
     """
-    raise NotImplementedError
+    if t <= 0:
+        raise ValidationError(f"andrews_lag: t must be positive, got {t}.")
+    return math.ceil(4.0 * math.pow(t / 100.0, 2.0 / 9.0))
 
 
 def forecast_metrics(
@@ -377,9 +479,20 @@ def forecast_metrics(
     ValidationError
         If inputs are empty or length-mismatched.
     """
-    raise NotImplementedError
+    yt, yp = _coerce_pair(y_true, y_pred_model, pred_name="y_pred_model")
+    naive = _naive_or_zeros(yt, y_pred_naive)
 
-
-def _norm_sf(x: float) -> float:
-    """Standard-normal survival function ``1 - Phi(x)`` via the error function."""
-    return 0.5 * math.erfc(x / math.sqrt(2.0))
+    rmse_return = rmse(yt, yp)
+    mae_return = mae(yt, yp)
+    mase = mase_vs_naive(yt, yp, naive)
+    acc, dir_p = directional_accuracy(yt, yp)
+    sharpe = net_pnl_sharpe(yt, yp, cost_bps=cost_bps)
+    return ForecastMetrics(
+        rmse_return=rmse_return,
+        mae_return=mae_return,
+        mase_vs_naive=mase,
+        directional_accuracy=acc,
+        directional_pvalue=dir_p,
+        net_pnl_sharpe=sharpe,
+        n_obs=int(yt.size),
+    )

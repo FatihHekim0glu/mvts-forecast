@@ -15,9 +15,13 @@ Importing this module has no side effects.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
+
+from mvtsforecast._exceptions import ValidationError
+from mvtsforecast.evaluation.diebold_mariano import dm_favours_model
 
 
 class Verdict(StrEnum):
@@ -123,4 +127,28 @@ def derive_verdict(
     ValidationError
         If ``dm_pvalue`` is outside ``[0, 1]`` or ``n_effective_trials < 1``.
     """
-    raise NotImplementedError
+    if not math.isfinite(dm_statistic):
+        raise ValidationError(f"dm_statistic must be finite, got {dm_statistic}.")
+    if not math.isfinite(dm_pvalue) or not 0.0 <= dm_pvalue <= 1.0:
+        raise ValidationError(f"dm_pvalue must be in [0, 1], got {dm_pvalue}.")
+    if not math.isfinite(deflated_sharpe):
+        raise ValidationError(f"deflated_sharpe must be finite, got {deflated_sharpe}.")
+    if n_effective_trials < 1:
+        raise ValidationError(f"n_effective_trials must be >= 1, got {n_effective_trials}.")
+
+    # Gate 1+2: the Diebold-Mariano test must be significant AND signed in the
+    # model's favour (strictly lower squared-error loss than the naive forecast).
+    dm_ok = dm_favours_model(dm_statistic, dm_pvalue, alpha=alpha)
+    # Gate 3: the Deflated Sharpe (FULL-grid n_trials) must clear zero.
+    dsr_ok = deflated_sharpe > 0.0
+
+    beats = dm_ok and dsr_ok
+    verdict = Verdict.DEEP_BEATS_NAIVE if beats else Verdict.NO_SIGNIFICANT_DIFFERENCE
+    return VerdictResult(
+        verdict=verdict,
+        deep_beats_naive=beats,
+        best_deep_model=best_deep_model,
+        dm_pvalue=dm_pvalue,
+        deflated_sharpe=deflated_sharpe,
+        n_effective_trials=n_effective_trials,
+    )
