@@ -31,7 +31,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from mvtsforecast._constants import EPS
+from mvtsforecast._exceptions import InsufficientDataError, ValidationError
 from mvtsforecast._typing import FloatArray, SequenceTensor
+from mvtsforecast._validation import ensure_dataframe
 
 # quantcore-candidate: purge/embargo mirror pairs-trading:evaluation/_purge.py +
 # lstm-forecast:walkforward/engine.py, generalized to the multivariate setting.
@@ -139,7 +142,21 @@ class Standardizer:
         ValidationError
             If the tensor's feature axis does not match the fitted statistics.
         """
-        raise NotImplementedError
+        arr = np.asarray(tensor, dtype=np.float64)
+        if arr.ndim != 3:
+            raise ValidationError(
+                f"Standardizer.transform: tensor must be 3-D, got ndim={arr.ndim}."
+            )
+        mean = np.asarray(self.mean, dtype=np.float64).ravel()
+        std = np.asarray(self.std, dtype=np.float64).ravel()
+        if arr.shape[2] != mean.shape[0]:
+            raise ValidationError(
+                f"Standardizer.transform: tensor feature axis ({arr.shape[2]}) does not "
+                f"match the fitted statistics ({mean.shape[0]})."
+            )
+        # Broadcast the per-feature stats over the (n_samples, look_back) axes.
+        out: SequenceTensor = (arr - mean) / std
+        return out
 
 
 def make_windows(
@@ -177,7 +194,62 @@ def make_windows(
     InsufficientDataError
         If the panel has fewer than ``look_back + horizon`` rows (no window).
     """
-    raise NotImplementedError
+    if spec.look_back < 1:
+        raise ValidationError(f"make_windows: look_back must be >= 1, got {spec.look_back}.")
+    if spec.horizon < 1:
+        raise ValidationError(f"make_windows: horizon must be >= 1, got {spec.horizon}.")
+
+    frame = ensure_dataframe(panel, name="panel")
+    columns = list(frame.columns)
+
+    if spec.target not in columns:
+        raise ValidationError(
+            f"make_windows: target {spec.target!r} is absent from the panel columns {columns}."
+        )
+
+    # Resolve the encoder feature columns. An empty spec defaults to the full
+    # panel; the explicit guard below removes the target's same-step transform.
+    feature_columns = list(spec.feature_columns) if spec.feature_columns else list(columns)
+    missing = [c for c in feature_columns if c not in columns]
+    if missing:
+        raise ValidationError(f"make_windows: feature columns {missing} are absent from the panel.")
+
+    if spec.drop_target_feature and spec.target in feature_columns:
+        feature_columns = [c for c in feature_columns if c != spec.target]
+    elif not spec.drop_target_feature and spec.target in feature_columns:
+        # Leaving the target's same-step transform in the encoder input is the
+        # very footgun this library exists to prevent; refuse it explicitly.
+        raise ValidationError(
+            f"make_windows: target {spec.target!r} would leak into the encoder input; "
+            "set drop_target_feature=True (the default) to exclude it."
+        )
+
+    if not feature_columns:
+        raise ValidationError("make_windows: no feature columns remain after dropping the target.")
+
+    n_rows = int(frame.shape[0])
+    span = spec.look_back + spec.horizon
+    if n_rows < span:
+        raise InsufficientDataError(
+            f"make_windows: panel has {n_rows} row(s) but at least look_back + horizon = "
+            f"{span} are required to form a single window."
+        )
+
+    features = frame.loc[:, feature_columns].to_numpy(dtype=np.float64)
+    target = frame.loc[:, spec.target].to_numpy(dtype=np.float64)
+
+    look_back = spec.look_back
+    # Window i covers rows [i, i + look_back); the aligned target is the return at
+    # row i + look_back + horizon - 1 (strictly AFTER the window — never inside it).
+    n_samples = n_rows - look_back - spec.horizon + 1
+    n_features = len(feature_columns)
+
+    x = np.empty((n_samples, look_back, n_features), dtype=np.float64)
+    for i in range(n_samples):
+        x[i] = features[i : i + look_back]
+    target_positions = np.arange(n_samples) + look_back + spec.horizon - 1
+    y = target[target_positions].astype(np.float64)
+    return x, y
 
 
 def assert_no_target_leakage(spec: WindowSpec) -> None:
@@ -198,7 +270,12 @@ def assert_no_target_leakage(spec: WindowSpec) -> None:
         If ``drop_target_feature`` is ``True`` but the target column is still
         listed in ``feature_columns``.
     """
-    raise NotImplementedError
+    if spec.drop_target_feature and spec.target in spec.feature_columns:
+        raise ValidationError(
+            f"assert_no_target_leakage: target {spec.target!r} is present in the encoder "
+            f"feature columns {list(spec.feature_columns)} while drop_target_feature=True; "
+            "the encoder must not read the value it predicts."
+        )
 
 
 def make_folds(
@@ -245,7 +322,82 @@ def make_folds(
     InsufficientDataError
         If there are too few samples to form ``n_folds`` purged test blocks.
     """
-    raise NotImplementedError
+    if n_samples < 1:
+        raise ValidationError(f"make_folds: n_samples must be >= 1, got {n_samples}.")
+    if look_back < 0:
+        raise ValidationError(f"make_folds: look_back must be >= 0, got {look_back}.")
+    if n_folds < 1:
+        raise ValidationError(f"make_folds: n_folds must be >= 1, got {n_folds}.")
+    if embargo < 0:
+        raise ValidationError(f"make_folds: embargo must be >= 0, got {embargo}.")
+    if test_size is not None and test_size < 1:
+        raise ValidationError(f"make_folds: test_size must be >= 1 when given, got {test_size}.")
+
+    # The purge gap is at least ``look_back`` samples so no look_back-length window
+    # can straddle a train/test boundary (the headline anti-leakage guard).
+    purge = look_back
+
+    # Reserve a warm-up region of at least one (rolling: ``look_back``) training
+    # sample(s) before the FIRST purge, so every fold's train slice is non-empty.
+    warmup = max(look_back, 1)
+
+    # Budget for the test blocks: total minus the warm-up, minus one purge gap per
+    # fold, minus an embargo gap after every fold except the last.
+    budget = n_samples - warmup - n_folds * purge - max(n_folds - 1, 0) * embargo
+    if test_size is None:
+        if budget < n_folds:
+            raise InsufficientDataError(
+                f"make_folds: {n_samples} sample(s) cannot host {n_folds} purged test block(s) "
+                f"with look_back={look_back}, embargo={embargo}."
+            )
+        resolved_test = budget // n_folds
+    else:
+        resolved_test = int(test_size)
+        if budget < n_folds * resolved_test:
+            raise InsufficientDataError(
+                f"make_folds: {n_samples} sample(s) cannot host {n_folds} test block(s) of "
+                f"size {resolved_test} with look_back={look_back}, embargo={embargo}."
+            )
+
+    if resolved_test < 1:
+        raise InsufficientDataError(
+            f"make_folds: resolved test_size ({resolved_test}) is empty for {n_samples} "
+            f"sample(s) and {n_folds} fold(s)."
+        )
+
+    # Build the folds left-to-right. Each test block of length ``resolved_test`` is
+    # preceded by a purge gap of ``look_back`` and (after the first) an embargo gap.
+    folds: list[Fold] = []
+    train_end = warmup  # first fold trains on the warm-up region, then purges
+    for fold_idx in range(n_folds):
+        test_start = train_end + purge
+        test_end = test_start + resolved_test
+        train_start = 0 if anchored else max(0, train_end - max(look_back, 1))
+
+        if train_end <= train_start:
+            raise InsufficientDataError(
+                f"make_folds: fold {fold_idx} has an empty train slice "
+                f"[{train_start}, {train_end}); not enough history."
+            )
+        if test_end > n_samples:
+            raise InsufficientDataError(
+                f"make_folds: fold {fold_idx} test block ends at {test_end} but only "
+                f"{n_samples} sample(s) exist; reduce n_folds or test_size."
+            )
+
+        folds.append(
+            Fold(
+                train_start=train_start,
+                train_end=train_end,
+                test_start=test_start,
+                test_end=test_end,
+            )
+        )
+        # The next fold's train slice expands (anchored) / rolls up to just before
+        # the next purge: it ends where the previous test block plus embargo ends.
+        train_end = test_end + embargo
+
+    return folds
 
 
 def fit_standardizer(
@@ -277,4 +429,24 @@ def fit_standardizer(
     ValidationError
         If ``x_train`` is not 3-D or is empty.
     """
-    raise NotImplementedError
+    arr = np.asarray(x_train, dtype=np.float64)
+    if arr.ndim != 3:
+        raise ValidationError(
+            f"fit_standardizer: x_train must be 3-D (n, look_back, n_features), got ndim={arr.ndim}."
+        )
+    if arr.size == 0:
+        raise ValidationError("fit_standardizer: x_train must be non-empty.")
+
+    # Per-feature stats over BOTH the sample and time axes of the TRAIN fold ONLY;
+    # the returned object is applied (never re-fitted) to the test fold.
+    mean = arr.mean(axis=(0, 1))
+    std = arr.std(axis=(0, 1))
+    std = np.maximum(std, EPS)
+
+    columns = tuple(feature_columns)
+    if columns and len(columns) != mean.shape[0]:
+        raise ValidationError(
+            f"fit_standardizer: feature_columns has {len(columns)} label(s) but x_train has "
+            f"{mean.shape[0]} feature(s)."
+        )
+    return Standardizer(mean=mean, std=std, feature_columns=columns)
