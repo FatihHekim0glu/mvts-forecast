@@ -68,7 +68,13 @@ def naive_forecast(y_true: FloatArray) -> NaiveResult:
     ValidationError
         If ``y_true`` is empty or non-finite.
     """
-    raise NotImplementedError
+    arr = np.asarray(y_true, dtype=np.float64).ravel()
+    if arr.size == 0:
+        raise ValidationError("naive_forecast: y_true must be non-empty.")
+    if not bool(np.isfinite(arr).all()):
+        raise ValidationError("naive_forecast: y_true contains non-finite values.")
+    n_obs = int(arr.size)
+    return NaiveResult(name="naive", forecast=persistence_returns(n_obs), n_obs=n_obs)
 
 
 def persistence_returns(n_obs: int) -> FloatArray:
