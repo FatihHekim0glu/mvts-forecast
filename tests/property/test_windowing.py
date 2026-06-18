@@ -322,6 +322,7 @@ def test_make_windows_rejects_missing_target() -> None:
 @given(
     n_samples=st.integers(min_value=80, max_value=400),
     look_back=st.integers(min_value=1, max_value=20),
+    horizon=st.integers(min_value=1, max_value=5),
     n_folds=st.integers(min_value=1, max_value=4),
     embargo=st.integers(min_value=0, max_value=5),
     anchored=st.booleans(),
@@ -330,15 +331,23 @@ def test_make_windows_rejects_missing_target() -> None:
 def test_folds_purge_keeps_windows_from_straddling(
     n_samples: int,
     look_back: int,
+    horizon: int,
     n_folds: int,
     embargo: int,
     anchored: bool,
 ) -> None:
-    """Every fold's train/test gap is at least ``look_back`` (no straddling)."""
+    """Every fold's train/test gap is at least ``look_back + horizon - 1``.
+
+    This is the horizon-aware no-straddle bound: a train sample's
+    ``horizon``-step-ahead label sits ``horizon - 1`` rows past the window, so
+    a gap of only ``look_back`` leaks the last train label into the first test
+    window for ``horizon > 1``.
+    """
     try:
         folds = make_folds(
             n_samples,
             look_back=look_back,
+            horizon=horizon,
             n_folds=n_folds,
             embargo=embargo,
             anchored=anchored,
@@ -350,8 +359,9 @@ def test_folds_purge_keeps_windows_from_straddling(
     assert len(folds) == n_folds
     prev_test_end = -1
     for fold in folds:
-        # Purge gap >= look_back: no look_back-length window can straddle.
-        assert fold.test_start - fold.train_end >= look_back
+        # Purge gap >= look_back + horizon - 1: neither a look_back-length window
+        # NOR its horizon-step-ahead label can straddle the train/test boundary.
+        assert fold.test_start - fold.train_end >= look_back + horizon - 1
         # Non-empty, ordered slices.
         assert fold.train_start < fold.train_end
         assert fold.test_start < fold.test_end
@@ -361,6 +371,30 @@ def test_folds_purge_keeps_windows_from_straddling(
         prev_test_end = fold.test_end
         if anchored:
             assert fold.train_start == 0
+
+
+@pytest.mark.property
+@given(
+    look_back=st.integers(min_value=2, max_value=15),
+    horizon=st.integers(min_value=1, max_value=5),
+)
+@settings(max_examples=50, deadline=None)
+def test_no_train_label_lands_in_test_window_rows(look_back: int, horizon: int) -> None:
+    """The last train label row never falls inside any test window's input rows.
+
+    Works in *row* space (not sample space): window ``i`` reads rows
+    ``[i, i+look_back)`` and its label is row ``i + look_back + horizon - 1``.
+    The horizon-aware purge must keep the last train sample's label strictly
+    before the first test window's first input row.
+    """
+    n_samples = 240
+    try:
+        fold = make_folds(n_samples, look_back=look_back, horizon=horizon, n_folds=1)[0]
+    except ValidationError:
+        return
+    last_train_label_row = (fold.train_end - 1) + look_back + horizon - 1
+    first_test_input_row = fold.test_start
+    assert last_train_label_row < first_test_input_row
 
 
 @pytest.mark.property
