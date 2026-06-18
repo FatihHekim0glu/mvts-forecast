@@ -162,7 +162,18 @@ def weak_factor_panel(
     ValidationError
         Propagated from :func:`synthetic_panel`.
     """
-    raise NotImplementedError
+    # A small factor relative to the (default) idiosyncratic noise: cross-sectional
+    # correlation is present but weak, so any common signal is far below the noise
+    # floor and a deep model still cannot beat naive after costs.
+    return synthetic_panel(
+        basket,
+        n_obs=n_obs,
+        seed=seed,
+        factor_vol=0.0015,
+        idio_vol=0.010,
+        ar1=0.0,
+        start=start,
+    )
 
 
 def random_walk_panel(
@@ -203,4 +214,20 @@ def random_walk_panel(
     ValidationError
         If ``basket`` is empty/duplicated, ``n_obs < 2``, or ``idio_vol < 0``.
     """
-    raise NotImplementedError
+    names = list(basket)
+    if len(names) == 0:
+        raise ValidationError("random_walk_panel: basket must be non-empty.")
+    if len(set(names)) != len(names):
+        raise ValidationError("random_walk_panel: basket must not contain duplicates.")
+    if n_obs < 2:
+        raise ValidationError(f"random_walk_panel: n_obs must be >= 2, got {n_obs}.")
+    if idio_vol < 0.0:
+        raise ValidationError(f"random_walk_panel: idio_vol must be >= 0, got {idio_vol}.")
+
+    gen = make_rng(seed)
+    # Pure i.i.d. Gaussian noise: no common factor, no autocorrelation. The
+    # next-step return is genuinely unpredictable, so the naive r_hat = 0 forecast
+    # is provably the OOS floor (the strictest honest-null testbed).
+    returns = gen.standard_normal((n_obs, len(names))) * idio_vol
+    index = _business_index(n_obs, start=start)
+    return pd.DataFrame(returns, index=index, columns=names, dtype="float64")
