@@ -391,8 +391,8 @@ def compare(
     Diebold-Mariano test of each model vs. naive, and derives the honest verdict
     via :func:`mvtsforecast.evaluation.verdict.derive_verdict` — ``deep_beats_naive``
     is ``False`` unless a deep model beats naive with a DM-significant margin AND a
-    positive Deflated Sharpe. On the synthetic null the verdict is ``False`` by
-    construction.
+    Deflated Sharpe that clears >= 0.95 (1 - alpha). On the synthetic null the
+    verdict is ``False`` by construction.
 
     Parameters
     ----------

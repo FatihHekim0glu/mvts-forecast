@@ -30,7 +30,7 @@ trended price level on its own lag — **not** forecasting skill. Here:
 - the encoder input never contains the target's same-step transform;
 - the verdict `deep_beats_naive` is a **pure function** of the evidence and reads
   `False` unless a deep model beats naive with a **DM-significant** margin **and** a
-  **positive Deflated Sharpe**.
+  **Deflated Sharpe ≥ 0.95 (1 − alpha)**.
 
 ## Models
 
@@ -96,8 +96,8 @@ The shipped default (synthetic panel, `target="SPY"`, `horizon=1`, `lookback=60`
 Read it carefully — the tiny DM p-values do **not** mean the deep models win.
 The naive forecast has the **lowest** RMSE; every deep model's loss differential
 is signed *against* it, so the DM test is significant **in naive's favour**. The
-verdict gate (DM-significant **and** in the model's favour **and** DSR > 0) is
-therefore never cleared:
+verdict gate (DM-significant **and** in the model's favour **and** DSR ≥ 0.95
+(1 − alpha)) is therefore never cleared:
 
 - **Directional accuracy** is a coin flip for every deep model (0.502–0.507);
   the binomial test does not reject 0.5.

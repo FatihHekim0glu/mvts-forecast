@@ -54,7 +54,7 @@ class ForecastSummary:
         Name of the lowest-RMSE model overall.
     deep_beats_naive:
         The PURE verdict: ``True`` iff a deep model beats naive with a
-        DM-significant margin AND a positive DSR.
+        DM-significant margin AND a DSR >= 0.95 (1 - alpha).
     n_effective_trials:
         The honest multiplicity count used for the DSR.
     data_source:

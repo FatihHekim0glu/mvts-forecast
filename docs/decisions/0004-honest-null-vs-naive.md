@@ -33,9 +33,11 @@ conditions that ALL must hold.** `evaluation/verdict.py::derive_verdict` returns
    default 0.05), using a Newey-West HAC long-run variance; **and**
 2. the DM statistic is **signed in the model's favour** (`dm_statistic < 0` —
    strictly lower squared-error loss than the naive forecast); **and**
-3. the **Deflated Sharpe** is strictly positive (`deflated_sharpe > 0`) against
-   the multiplicity-inflated benchmark, where `n_trials` is the **full
-   configuration grid** (architectures × HP configs), not 1.
+3. the **Deflated Sharpe** clears the 1-alpha confidence threshold
+   (`deflated_sharpe >= 0.95 (1 - alpha)`) against the multiplicity-inflated
+   benchmark, where `n_trials` is the **full configuration grid** (architectures ×
+   HP configs), not 1. The DSR is a probability in `[0, 1]` (a CDF), so gating at
+   `> 0` would be vacuous; the portfolio standard gates at `1 - alpha = 0.95`.
 
 If **any** gate fails, the verdict is `NO_SIGNIFICANT_DIFFERENCE` and
 `deep_beats_naive = false`, regardless of any favourable point estimate. The
@@ -52,7 +54,8 @@ locks the same outcome on a pure random walk.
 ## Consequences
 
 - **Positive.** The headline cannot over-claim: a win requires a significant,
-  correctly-signed DM margin *and* a positive multiplicity-corrected Sharpe.
+  correctly-signed DM margin *and* a multiplicity-corrected Sharpe that clears
+  the 1-alpha confidence threshold (DSR ≥ 0.95).
 - **Positive.** The verdict is reproducible and auditable — same evidence, same
   bool — and the honest NULL is the *measured* result, not an assertion.
 - **Cost.** The project's headline is deliberately modest

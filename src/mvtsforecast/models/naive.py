@@ -4,7 +4,8 @@ On noisy daily returns the best honest forecast of the next return is the random
 walk: ``r_hat_{t+1} = 0`` (equivalently, the price's last value persists). This
 baseline is pure numpy, runs LIVE in the serve container (no torch, no ONNX), and
 is the floor every deep model is measured against. A deep model only "beats naive"
-if it lowers squared-error loss with a DM-significant margin AND a positive DSR.
+if it lowers squared-error loss with a DM-significant margin AND a DSR that clears
+>= 0.95 (1 - alpha).
 
 Importing this module has no side effects.
 """

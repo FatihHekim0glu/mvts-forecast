@@ -12,8 +12,8 @@ The documented, literature-consistent headline: on noisy daily returns the deep
 models do NOT reliably beat the naive baseline OOS on directional accuracy or
 risk-adjusted PnL after costs (DM insignificant, DSR ~ 0). The deliverable is the
 rigorous comparison, not a profit claim. The PURE ``deep_beats_naive`` verdict is
-``False`` unless a deep model beats naive with a DM-significant margin AND a
-positive DSR.
+``False`` unless a deep model beats naive with a DM-significant margin AND a DSR
+that clears >= 0.95 (1 - alpha).
 
 IMPORT PURITY: this package has ZERO import-time side effects and imports NO heavy
 dependency at module load. torch (``models.lstm`` / ``models.patchtst`` /

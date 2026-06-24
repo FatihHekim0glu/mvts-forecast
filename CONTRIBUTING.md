@@ -53,7 +53,7 @@ contributing, preserve the non-negotiables:
   encoder input never contains the target's same-step transform.
 - `deep_beats_naive` is a **pure function** of the inference and must read `False`
   unless a deep model beats naive with a **Diebold-Mariano-significant** margin
-  **and** a **positive Deflated Sharpe**.
+  **and** a **Deflated Sharpe ≥ 0.95 (1 − alpha)**.
 - `src/mvtsforecast/` is **import-pure**: no torch / onnxruntime / statsmodels /
   plotly / network / training at import time (heavy imports live behind functions
   or `__main__`). Training is **offline**; the serve container runs onnxruntime

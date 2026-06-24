@@ -28,7 +28,7 @@ in [`docs/decisions/`](decisions/).
 
 - Beating a random walk on noisy daily returns. The honest finding — documented
   and regression-locked — is that the deep models do **not**, by a
-  DM-significant margin with a positive Deflated Sharpe.
+  DM-significant margin with a Deflated Sharpe ≥ 0.95 (1 − alpha).
 - A live trading system or a profit claim. This is a research/benchmark library.
 - A price-level forecaster. There is **no price-level R²** anywhere
   ([ADR-0005](decisions/0005-no-price-level-r2.md)); skill is judged in return
@@ -197,7 +197,7 @@ The compute core guarantees, and tests enforce:
    configuration grid as `n_trials` and is non-increasing in it.
 8. **Verdict safety.** `deep_beats_naive` cannot read `True` unless a deep model
    beats naive with a DM-significant margin signed in its favour **and** a
-   positive Deflated Sharpe (truth-table unit-tested).
+   Deflated Sharpe ≥ 0.95 (1 − alpha) (truth-table unit-tested).
 9. **Determinism.** Same `RunManifest` seed → byte-identical panel, forecasts,
    and `metrics.json`.
 10. **Import purity.** Importing any `src/mvtsforecast` module triggers no torch,

@@ -5,7 +5,8 @@ model clears ALL THREE gates simultaneously:
 
 1. the Diebold-Mariano test is significant (``dm_pvalue < alpha``);
 2. the DM statistic is signed in the model's favour (``dm_statistic < 0``);
-3. the Deflated Sharpe is strictly positive (``deflated_sharpe > 0``).
+3. the Deflated Sharpe clears the 1-alpha confidence threshold
+   (``deflated_sharpe >= 0.95``).
 
 If ANY gate fails, the verdict is ``NO_SIGNIFICANT_DIFFERENCE`` — the honest,
 literature-consistent outcome on noisy daily returns. This is the anti-narration
@@ -25,18 +26,24 @@ pytestmark = pytest.mark.regression
 
 # (dm_statistic, dm_pvalue, deflated_sharpe) -> deep_beats_naive
 _TRUTH_TABLE = [
-    # All three gates pass -> the ONLY True row.
-    ((-3.0, 0.001, 0.7), True),
-    # DM insignificant (p >= alpha) -> False even with a great DSR and sign.
-    ((-3.0, 0.20, 0.9), False),
+    # All three gates pass (DSR clears the 0.95 = 1 - alpha threshold) -> the ONLY
+    # True row.
+    ((-3.0, 0.001, 0.97), True),
+    # DM insignificant (p >= alpha) -> False even with a clearing DSR and sign.
+    ((-3.0, 0.20, 0.99), False),
     # DM significant but POSITIVE statistic (model worse) -> False.
-    ((3.0, 0.001, 0.9), False),
-    # DM significant and negative, but DSR == 0 (not strictly positive) -> False.
+    ((3.0, 0.001, 0.99), False),
+    # DM significant and negative, but DSR below 0.95 (1 - alpha) -> False. This is
+    # the gate the standardisation tightened: a "positive" DSR no longer suffices.
+    ((-3.0, 0.001, 0.7), False),
+    # DM significant and negative, but DSR exactly at 0 -> False.
     ((-3.0, 0.001, 0.0), False),
     # DM significant and negative, but DSR negative -> False.
     ((-3.0, 0.001, -0.2), False),
+    # Borderline: DSR just below the 0.95 threshold is NOT >= 0.95 -> False.
+    ((-3.0, 0.001, 0.9499), False),
     # Borderline: p exactly at alpha is NOT < alpha -> False.
-    ((-3.0, 0.05, 0.9), False),
+    ((-3.0, 0.05, 0.99), False),
     # Everything fails -> False.
     ((1.5, 0.9, -0.5), False),
 ]
@@ -65,8 +72,9 @@ def test_verdict_carries_evidence_through() -> None:
 
 
 def test_verdict_alpha_is_respected() -> None:
-    # With a stricter alpha, a p that previously cleared 0.05 now fails.
-    inputs = (-3.0, 0.03, 0.9)
+    # With a stricter alpha, a p that previously cleared 0.05 now fails. The DSR
+    # (0.97) clears the 0.95 = 1 - alpha gate so the DM-alpha effect is isolated.
+    inputs = (-3.0, 0.03, 0.97)
     assert derive_verdict("m", *inputs, n_effective_trials=4).deep_beats_naive is True
     strict = derive_verdict("m", *inputs, n_effective_trials=4, alpha=0.01)
     assert strict.deep_beats_naive is False
@@ -75,7 +83,7 @@ def test_verdict_alpha_is_respected() -> None:
 def test_verdict_to_dict_is_json_safe() -> None:
     import json
 
-    result = derive_verdict("lstm", -2.0, 0.04, 0.1, n_effective_trials=6)
+    result = derive_verdict("lstm", -2.0, 0.04, 0.96, n_effective_trials=6)
     d = result.to_dict()
     json.dumps(d)  # must not raise
     assert d["verdict"] == "deep_beats_naive"
