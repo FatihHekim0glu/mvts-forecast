@@ -21,6 +21,7 @@ from mvtsforecast.serve import (
     _ordered,
     _safe_float,
     _serve_deep,
+    _trial_variance,
     build_figures,
     forecast_from_onnx,
     run_forecast,
@@ -244,5 +245,33 @@ def test_build_figures_returns_empty_on_missing_plotly(monkeypatch: pytest.Monke
 def test_model_dsr_is_finite_probability() -> None:
     rng = np.random.default_rng(0)
     y_true = rng.normal(scale=0.01, size=64)
-    dsr = _model_dsr(y_true, np.zeros(64))
+    forecasts = {"naive": np.zeros(64), "arima": rng.normal(scale=0.001, size=64)}
+    # The honest cross-trial V comes from the served models' Sharpe ratios.
+    v_trials = _trial_variance(y_true, forecasts)
+    dsr = _model_dsr(y_true, forecasts["naive"], v_trials)
     assert 0.0 <= dsr <= 1.0
+
+
+def test_trial_variance_uses_real_sharpe_dispersion() -> None:
+    # The serve V helper computes the REAL sample variance of the served models'
+    # per-observation Sharpe ratios — never the fabricated ``1 / n_obs`` heuristic.
+    from mvtsforecast.evaluation.dsr import variance_of_trial_sharpes
+    from mvtsforecast.evaluation.metrics import net_pnl_sharpe
+
+    rng = np.random.default_rng(1)
+    y_true = rng.normal(scale=0.01, size=128)
+    forecasts = {
+        "naive": np.zeros(128),
+        "arima": rng.normal(scale=0.002, size=128),
+        "lstm": rng.normal(scale=0.003, size=128),
+    }
+    expected = variance_of_trial_sharpes([net_pnl_sharpe(y_true, p) for p in forecasts.values()])
+    assert _trial_variance(y_true, forecasts) == pytest.approx(expected)
+    assert _trial_variance(y_true, forecasts) != pytest.approx(1.0 / 128)
+
+
+def test_trial_variance_single_model_fallback_is_zero() -> None:
+    # A single served model => fewer than two trial Sharpes => 0.0 fallback.
+    rng = np.random.default_rng(2)
+    y_true = rng.normal(scale=0.01, size=64)
+    assert _trial_variance(y_true, {"naive": np.zeros(64)}) == 0.0
